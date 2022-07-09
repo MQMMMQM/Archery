@@ -276,6 +276,9 @@ class ExecuteCheckSerializer(serializers.Serializer):
             raise serializers.ValidationError({"errors": f"不存在该实例：{instance_id}"})
         return instance_id
 
+    def get_instance(self):
+        return Instance.objects.get(pk=self.validated_data["instance_id"])
+
 
 class ExecuteCheckResultSerializer(serializers.Serializer):
     is_execute = serializers.BooleanField(read_only=True, default=False)
@@ -293,36 +296,37 @@ class ExecuteCheckResultSerializer(serializers.Serializer):
 
 
 class WorkflowSerializer(serializers.ModelSerializer):
-    def validate(self, attrs):
-        engineer = attrs.get("engineer")
-        group_id = attrs.get("group_id")
+    def to_internal_value(self, data):
+        if data.get("run_date_start") == "":
+            data["run_date_start"] = None
+        if data.get("run_date_end") == "":
+            data["run_date_end"] = None
+        return super().to_internal_value(data)
 
-        try:
-            Users.objects.get(username=engineer)
-        except Users.DoesNotExist:
-            raise serializers.ValidationError(f"不存在该用户：{engineer}")
-
+    def validate_group_id(self, group_id):
         try:
             ResourceGroup.objects.get(pk=group_id)
         except ResourceGroup.DoesNotExist:
-            raise serializers.ValidationError(f"不存在该资源组：{group_id}")
-
-        return attrs
+            raise serializers.ValidationError({"errors": f"不存在该资源组：{group_id}"})
+        return group_id
 
     class Meta:
         model = SqlWorkflow
         fields = "__all__"
         read_only_fields = [
             "status",
-            "is_backup",
             "syntax_type",
             "audit_auth_groups",
             "engineer_display",
             "group_name",
             "finish_time",
             "is_manual",
+            "engineer",
         ]
-        extra_kwargs = {"demand_url": {"required": False}}
+        extra_kwargs = {
+            "demand_url": {"required": False},
+            "is_backup": {"required": False},
+        }
 
 
 class WorkflowContentSerializer(serializers.ModelSerializer):
@@ -333,9 +337,8 @@ class WorkflowContentSerializer(serializers.ModelSerializer):
         workflow_data = validated_data.pop("workflow")
         instance = workflow_data["instance"]
         sql_content = validated_data["sql_content"].strip()
-        user = Users.objects.get(username=workflow_data["engineer"])
+        user = self.context["request"].user  # 只能提交自己负责的资源
         group = ResourceGroup.objects.get(pk=workflow_data["group_id"])
-        active_user = Users.objects.filter(is_active=1)
 
         # 验证组权限（用户是否在该组、该组是否有指定实例）
         try:
@@ -411,7 +414,6 @@ class WorkflowContentSerializer(serializers.ModelSerializer):
                 async_task(
                     notify_for_audit,
                     audit_id=audit_id,
-                    cc_users=active_user,
                     timeout=60,
                     task_name=f"sqlreview-submit-{workflow.id}",
                 )
