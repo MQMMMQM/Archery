@@ -251,27 +251,6 @@ def passed(request):
     except SqlWorkflow.DoesNotExist:
         return render(request, "error.html", {"errMsg": "工单不存在"})
 
-    # 获取用户所属的权限组ID列表
-    user_auth_group_ids = [
-        group.id for group in Group.objects.filter(user=request.user)
-    ]
-
-    # 获取当前工单的WorkflowAudit对象
-    try:
-        workflow_audit = WorkflowAudit.objects.get(
-            workflow_id=workflow_id, workflow_type=WorkflowType.SQL_REVIEW
-        )
-    except WorkflowAudit.DoesNotExist:
-        return render(request, "error.html", {"errMsg": "审核记录不存在"})
-
-    # 检查用户是否在当前审批组中
-    if (
-        workflow_audit.current_audit
-        and int(workflow_audit.current_audit) not in user_auth_group_ids
-        and not request.user.is_superuser
-    ):
-        return render(request, "error.html", {"errMsg": "权限不足，您不在当前审批组中"})
-
     sys_config = SysConfig()
     auditor = get_auditor(workflow=sql_workflow, sys_config=sys_config)
     # 使用事务保持数据一致性

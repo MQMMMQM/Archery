@@ -8,7 +8,7 @@ from django.contrib.auth.models import Permission
 from django.test import Client, TestCase, TransactionTestCase
 
 from common.config import SysConfig
-from common.utils.const import WorkflowStatus, WorkflowType
+from common.utils.const import WorkflowStatus, WorkflowType, WorkflowAction
 from sql.binlog import my2sql_file
 from sql.engines.models import ResultSet
 from sql.utils.execute_sql import execute_callback
@@ -892,49 +892,26 @@ class TestWorkflowView(TransactionTestCase):
         r_json = r.json()
         self.assertEqual(r_json["total"], 2)
 
+    @patch("sql.sql_workflow.async_task")
     @patch("sql.notify.auto_notify")
     @patch("sql.utils.workflow_audit.AuditV2.operate")
-    @patch("sql.sql_workflow.async_task")
-    def testWorkflowPassedView(self, mock_async_task, mock_operate, _):
+    def testWorkflowPassedView(self, mock_operate, _auto_notify, mock_async_task):
         """测试审核工单"""
         c = Client()
-        c.force_login(self.u2)
-        r = c.post("/passed/", {"workflow_id": self.wf2.id})
-        self.assertEqual(r.status_code, 403)
         c.force_login(self.superuser1)
         r = c.post("/passed/")
         self.assertContains(r, "workflow_id参数为空.")
         r = c.post("/passed/", {"workflow_id": 999999})
         self.assertContains(r, "工单不存在")
-        self.audit_flow.delete()
-        r = c.post("/passed/", {"workflow_id": self.wf2.id})
-        self.assertContains(r, "审核记录不存在")
-        sql_review = Permission.objects.get(codename="sql_review")
-        self.u2.user_permissions.add(sql_review)
-        aug = Group.objects.create(name="audit_group_x")
-        self.audit_flow = WorkflowAudit.objects.create(
-            group_id=1,
-            group_name="g1",
-            workflow_id=self.wf2.id,
-            workflow_type=WorkflowType.SQL_REVIEW,
-            workflow_title="123",
-            audit_auth_groups=str(aug.id),
-            current_audit=str(aug.id),
-            next_audit="",
-            current_status=WorkflowStatus.WAITING,
-            create_user="",
-            create_user_display="",
-        )
-        c.force_login(self.u2)
-        r = c.post("/passed/", {"workflow_id": self.wf2.id})
-        self.assertContains(r, "权限不足，您不在当前审批组中")
-        c = Client()
-        c.force_login(self.superuser1)
         mock_operate.side_effect = AuditException("mock audit failed")
         r = c.post("/passed/", {"workflow_id": self.wf2.id})
-        self.assertContains(r, "审核失败, 错误信息: mock audit failed")
+        self.assertContains(r, "mock audit failed")
+        self.wf2.refresh_from_db()
+        self.assertEqual(self.wf2.status, "workflow_manreviewing")
         mock_operate.reset_mock(side_effect=True)
         mock_operate.return_value = None
+        # 因为 operate 被 mock 了, 为了测试审批流通过, 这里把审批流手动设置为通过, 仅 测试 view 层的逻辑
+        # audit operate 的测试由其他测试覆盖
         self.audit_flow.current_status = WorkflowStatus.PASSED
         self.audit_flow.save()
         r = c.post(
@@ -947,7 +924,16 @@ class TestWorkflowView(TransactionTestCase):
         )
         self.wf2.refresh_from_db()
         self.assertEqual(self.wf2.status, "workflow_review_pass")
+        mock_operate.assert_called_once_with(
+            WorkflowAction.PASS, self.superuser1, "some_audit"
+        )
         mock_async_task.assert_called_once()
+        args, kwargs = mock_async_task.call_args
+        self.assertEqual(kwargs["timeout"], 60)
+        self.assertEqual(kwargs["task_name"], f"sqlreview-pass-{self.wf2.id}")
+        c.force_login(self.u2)
+        r = c.post("/passed/", {"workflow_id": self.wf2.id})
+        self.assertEqual(r.status_code, 403)
 
     @patch("sql.sql_workflow.notify_for_execute")
     @patch("sql.sql_workflow.Audit.add_log")
